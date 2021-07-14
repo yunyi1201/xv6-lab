@@ -30,18 +30,8 @@ procinit(void)
   initlock(&pid_lock, "nextpid");
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
-
-      // Allocate a page for the process's kernel stack.
-      // Map it high in memory, followed by an invalid
-      // guard page.
-      char *pa = kalloc();
-      if(pa == 0)
-        panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
   }
-  kvminithart();
+  //kvminithart();
 }
 
 // Must be called with interrupts disabled,
@@ -105,14 +95,20 @@ allocproc(void)
   return 0;
 
 found:
-  p->pid = allocpid();
 
+	p->pid = allocpid();
+
+	// allocate a kernel page table
+	
+	if((p->kpagetable = kvmcreat()) == 0){
+		release(&p->lock);
+		return 0;
+	}
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
     release(&p->lock);
     return 0;
   }
-
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
@@ -120,7 +116,13 @@ found:
     release(&p->lock);
     return 0;
   }
-
+	// allocate kernel stack
+	char *pa = kalloc();
+  if(pa == 0)
+  	panic("kalloc");
+  uint64 va = KSTACK((int) (p - proc));
+  kvmmap(p->kpagetable, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = va;
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -136,11 +138,16 @@ found:
 static void
 freeproc(struct proc *p)
 {
+	if(p->kstack)
+		uvmunmap(p->kpagetable, p->kstack, 1, 1);
+	if(p->kpagetable)
+		kfreepagetable(p->kpagetable);
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
+	p->kpagetable = 0;
   p->pagetable = 0;
   p->sz = 0;
   p->pid = 0;
@@ -220,7 +227,7 @@ userinit(void)
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
-
+	uvm2k(p->pagetable, p->kpagetable, 0, p->sz);
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
   p->trapframe->sp = PGSIZE;  // user stack pointer
@@ -246,8 +253,13 @@ growproc(int n)
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+		if(uvm2k(p->pagetable, p->kpagetable, sz-n, sz) != 0){
+			return -1;
+		}
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
+		if(n>=PGSIZE)
+	  	uvmunmap(p->kpagetable, PGROUNDUP(sz), n/PGSIZE, 0);
   }
   p->sz = sz;
   return 0;
@@ -288,6 +300,11 @@ fork(void)
     if(p->ofile[i])
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
+
+	if(uvm2k(np->pagetable, np->kpagetable, 0, np->sz) != 0){
+		release(&np->lock);
+		return -1;
+	}
 
   safestrcpy(np->name, p->name, sizeof(p->name));
 
@@ -473,6 +490,8 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+				w_satp(MAKE_SATP(p->kpagetable));
+				sfence_vma();
         swtch(&c->context, &p->context);
 
         // Process is done running for now.
@@ -485,6 +504,7 @@ scheduler(void)
     }
 #if !defined (LAB_FS)
     if(found == 0) {
+			kvminithart();	
       intr_on();
       asm volatile("wfi");
     }
