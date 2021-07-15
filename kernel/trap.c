@@ -29,6 +29,24 @@ trapinithart(void)
   w_stvec((uint64)kernelvec);
 }
 
+int 
+lazyallocat(uint64 va)
+{
+	struct proc* p = myproc();	
+	if(va >= p->sz || va < p->trapframe->sp)
+		return -1;
+	va = PGROUNDDOWN(va);
+	char* mem = kalloc();
+	if(mem == 0)
+		return -1;
+	memset(mem, 0, PGSIZE);
+	if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, PTE_W|PTE_R|PTE_X|PTE_U) != 0){
+		kfree(mem);
+		return -1;
+	}
+	return 0;
+}
+
 //
 // handle an interrupt, exception, or system call from user space.
 // called from trampoline.S
@@ -66,16 +84,10 @@ usertrap(void)
 
     syscall();
   } else if(r_scause() == 13 || r_scause() == 15){
-		uint64 newsz = PGROUNDDOWN(r_stval());
-		char *mem = kalloc();
-		if(mem == 0)
-			panic("lazy allocate: no mem\n");
-		memset(mem, 0, PGSIZE);
-		if(mappages(p->pagetable, newsz, PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0){	
-			kfree((void *)mem);		
-			panic("lazy allocate: map failed\n");
-		}
-	}else if((which_dev = devintr()) != 0){
+			uint64 va = r_stval();
+			if(lazyallocat(va) != 0)
+				p->killed = 1;
+		}else if((which_dev = devintr()) != 0){
     // ok
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
