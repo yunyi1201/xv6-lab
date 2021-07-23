@@ -15,7 +15,7 @@ extern char trampoline[], uservec[], userret[];
 void kernelvec();
 
 extern int devintr();
-
+extern pte_t* walk(pagetable_t, uint64, int);
 void
 trapinit(void)
 {
@@ -67,7 +67,45 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else {
+  } else if(r_scause() == 15){
+		uint64 va = r_stval();
+		uint64 pa;
+		pte_t* pte;
+		if(va > MAXVA){
+			p->killed = 1;
+			printf("invalid address\n");
+		}
+		if(va > p->sz){
+			p->killed = 1;
+			printf("invalid address\n");
+		}
+		va = PGROUNDDOWN(va);
+		pte = walk(p->pagetable, va, 0);
+		if(pte == 0){
+			printf("pte no exist\n");
+			p->killed = 1;
+		}
+		if((*pte & PTE_V) && (*pte & PTE_U) && (*pte & PTE_COW)){
+			uint flags = PTE_FLAGS(*pte);
+			flags |= PTE_W;
+			flags &= (~PTE_COW);
+			char* mem = kalloc();
+			if(mem == 0){
+				printf("no cow mem\n");
+				p->killed = 1;
+			}
+			pa = PTE2PA(*pte);
+			memmove((void*)mem, (void*)pa, PGSIZE);
+			uvmunmap(p->pagetable, va, 1, 0);
+			kfree((void *)pa);
+			if(mappages(p->pagetable,	va, PGSIZE, (uint64)mem, flags) != 0){
+				kfree((void *)mem);
+				p->killed = 1;
+				printf("mapp failure\n");
+			}
+		}
+	}
+	else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;

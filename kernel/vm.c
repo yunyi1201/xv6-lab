@@ -156,8 +156,8 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
   for(;;){
     if((pte = walk(pagetable, a, 1)) == 0)
       return -1;
-    if(*pte & PTE_V)
-      panic("remap");
+   // if(*pte & PTE_V)
+  //  panic("remap");
     *pte = PA2PTE(pa) | perm | PTE_V;
     if(a == last)
       break;
@@ -311,23 +311,26 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
-  for(i = 0; i < sz; i += PGSIZE){
+  for(i = 0; i < sz; i += PGSIZE) {
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+		flags |= PTE_COW;
+		flags &= (~PTE_W);	
+		uvmunmap(old, i, 1, 0);
+		if(mappages(old, i, PGSIZE, pa, flags) != 0 )
+			goto err;
+
+    if(mappages(new, i, PGSIZE, pa, flags) != 0){
       goto err;
     }
-  }
+		//TODO increasing refcnt
+		add_ref(pa);
+	}
   return 0;
 
  err:
@@ -354,11 +357,40 @@ uvmclear(pagetable_t pagetable, uint64 va)
 int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
+	printf("enter copyout\n");
   uint64 n, va0, pa0;
-
-  while(len > 0){
+	pte_t* pte;
+	  while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-    pa0 = walkaddr(pagetable, va0);
+		if(va0 >= MAXVA)
+			return -1;
+    //pa0 = walkaddr(pagetable, va0);
+		pte = walk(pagetable, va0, 0);
+		if(pte == 0)
+			return -1;
+		if((*pte & PTE_V) == 0)
+			return -1;
+		if((*pte & PTE_U) == 0)
+			return -1;
+		pa0 = PTE2PA(*pte);
+		if(*pte & PTE_COW){
+			uint flags = PTE_FLAGS(*pte);
+			flags |= PTE_W;
+			flags &= (~PTE_COW);
+			char *mem = kalloc();
+			if(mem == 0)
+				return -1;
+			memmove(mem, (void*)pa0, PGSIZE);
+			uvmunmap(pagetable, va0, 1, 0);
+			kfree((void *)pa0);
+			if(mappages(pagetable, va0, PGSIZE, (uint64)mem, flags) != 0){
+				printf("map failure\n");
+				return -1;
+			}
+			pa0 = (uint64)mem;
+			return -1;
+		}
+		pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
     n = PGSIZE - (dstva - va0);
@@ -370,6 +402,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
     src += n;
     dstva = va0 + PGSIZE;
   }
+	printf("away copyout\n");
   return 0;
 }
 
